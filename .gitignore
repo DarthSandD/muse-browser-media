@@ -1,0 +1,15 @@
+# Generated media and local artefacts
+assets/*.mp4
+assets/*.webm
+assets/*.mov
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
