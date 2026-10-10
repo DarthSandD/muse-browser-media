@@ -223,8 +223,50 @@ def muse_video(prompt, out_path, timeout_s=1800, poll_s=20):
     if r.returncode != 0 or not os.path.exists(out_path):
         raise RuntimeError(f"download failed: {r.stderr[:200]}")
     size = os.path.getsize(out_path)
+    if size == 0:
+        raise RuntimeError(f"download produced an empty file at {out_path}")
+
+    # Verify the artifact is really a decodable video, not an HTML error page
+    # saved under a .mp4 name. This is the step the README promises.
+    probe_video(out_path)
+
     print(f"[muse] saved {out_path} ({size:,} bytes) as '{name}'", flush=True)
     return out_path
+
+
+def probe_video(path):
+    """Confirm `path` is a decodable video; raise with the reason otherwise.
+
+    Returns the parsed ffprobe fields on success. A render is only trustworthy
+    when a decoder agrees it is a video, so callers should treat a failure here
+    as a failed render rather than a cosmetic warning.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_name,codec_type,width,height",
+             "-show_entries", "format=duration,size",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffprobe not found on PATH — install ffmpeg to verify renders")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffprobe rejected {path}: {e.stderr[:200]}")
+
+    info = json.loads(out or "{}")
+    streams = info.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if video is None:
+        raise RuntimeError(f"no video stream in {path} — not a video file")
+
+    fmt = info.get("format") or {}
+    print(f"[verify] {os.path.basename(path)}: "
+          f"codec={video.get('codec_name')} "
+          f"{video.get('width')}x{video.get('height')} "
+          f"duration={fmt.get('duration')}s", flush=True)
+    return {"video": video, "format": fmt}
 
 
 # ------------------------------------------------------------------ Gemini image

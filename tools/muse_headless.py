@@ -30,7 +30,12 @@ LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_muse_headless.l
 # Memory-frugal flags. Verified: CDP up in ~3s, Muse SPA loads and is logged in.
 FLAGS = [
     f"--remote-debugging-port={PORT}",
-    "--remote-allow-origins=*",
+    # Narrow the CDP origin allowlist to our own loopback DevTools origin.
+    # `*` let ANY web page in the user's browser open a CDP socket to this port
+    # and drive the browser (arbitrary navigation + script execution). The
+    # Python client sends no Origin header, so it is unaffected; the DevTools
+    # frontend served from this port still works.
+    f"--remote-allow-origins=http://127.0.0.1:{PORT}",
     f"--user-data-dir={PROFILE}",
     "--headless=new",
     "--no-first-run",
@@ -55,6 +60,46 @@ def _ps(cmd):
     r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
                        capture_output=True, text=True)
     return r.stdout.strip()
+
+
+def _pids():
+    """PIDs of every running browser process, as a list of ints.
+
+    Used to kill exactly the processes we own rather than every instance of the
+    browser binary on the machine — `taskkill /IM chrome.exe` would also take
+    down the user's own everyday browser windows.
+    """
+    try:
+        out = _ps(f"(Get-Process {_proc_name()} -ErrorAction SilentlyContinue).Id")
+        return [int(p) for p in out.split() if p.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _our_pids():
+    """PIDs of browser processes belonging to THIS tool only.
+
+    A process counts as ours when its command line carries our dedicated profile
+    directory or our CDP port — the same identity we launched with. A normal
+    browser window the user has open is never matched, so stopping this tool
+    cannot close their everyday browser.
+    """
+    if not PROFILE or not os.path.isabs(PROFILE):
+        return []
+    exe = os.path.basename(BROWSER_BIN)
+    # One query; filter in PowerShell on either our profile path or our port.
+    ps = (
+        f"$prof='{PROFILE}'; $port='--remote-debugging-port={PORT}'; "
+        f"Get-CimInstance Win32_Process -Filter \"Name='{exe}'\" "
+        "| Where-Object { $_.CommandLine -and "
+        "($_.CommandLine -like \"*$prof*\" -or $_.CommandLine -like \"*$port*\") } "
+        "| Select-Object -ExpandProperty ProcessId"
+    )
+    try:
+        out = _ps(ps)
+        return [int(p) for p in out.split() if p.strip().isdigit()]
+    except Exception:
+        return []
 
 
 def free_ram_gb():
@@ -107,11 +152,23 @@ def stop():
     if browser_count() == 0:
         log("stop: browser not running")
         return True
-    subprocess.run(["taskkill", "/F", "/IM", os.path.basename(BROWSER_BIN)],
-                   capture_output=True, text=True)
+    # Kill only the processes this tool launched (matched by our own profile
+    # directory / debug port). A blanket `taskkill /IM <browser>` would also
+    # close the user's everyday browser windows.
+    pids = _our_pids()
+    if not pids:
+        log("stop: no browser process matched our profile/port — nothing killed")
+        return browser_count() == 0
+    killed = []
+    for pid in pids:
+        r = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            killed.append(pid)
     time.sleep(3)
     n = browser_count()
-    log(f"stop: {_proc_name()} procs now {n}")
+    log(f"stop: killed {len(killed)}/{len(pids)} of our pids {pids}; "
+        f"{_proc_name()} procs now {n}")
     return n == 0
 
 
